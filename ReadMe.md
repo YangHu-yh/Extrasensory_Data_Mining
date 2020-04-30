@@ -1,4 +1,4 @@
-  ### Extrasensory
+  # Extrasensory
   
   Our team members are: Zifan Xu, Yang Hu, Xuan Wang, Seungmin Kang.
   
