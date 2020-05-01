@@ -1,5 +1,5 @@
 import numpy as np
-
+from numpy import linalg
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,28 +8,41 @@ from torch.optim import SGD, lr_scheduler, Adam
 from sklearn.base import ClassifierMixin
 
 from utilize.test import evaluate_model
-
+alpha = 0.0001
 class MLP(nn.Module):
 	# MLP model with two hidden layers realized by pytorch 
 
-	def __init__(self, n_hidden_layers, n_features, n_labels, device):
+	def __init__(self, n_hidden_layers, n_features, n_labels, dropout1, dropout2, batchnorm1, batchnorm2, alpha):
 		# Initialization: take n_hidden_layers, n_feaures and n_labels as input 
 		super(MLP, self).__init__()
 		self.n_features = n_features
 		self.n_labels = n_labels
 		self.n_hidden_layers = n_hidden_layers
+		self.batchnorm1 = batchnorm1
+		self.batchnorm2 = batchnorm2
 		# fc1, fc2 two hidden layers, fc3 output layer
+		self.fc0_bn = nn.BatchNorm1d(num_features=n_features)
 		self.fc1 = nn.Linear(n_features, n_hidden_layers[0])
+		self.fc1_bn = nn.BatchNorm1d(num_features=n_hidden_layers[0])
+		self.fc1_do = nn.Dropout(p = dropout1)
 		self.fc2 = nn.Linear(n_hidden_layers[0], n_hidden_layers[1])
+		self.fc2_bn = nn.BatchNorm1d(num_features=n_hidden_layers[1])
+		self.fc2_do = nn.Dropout(p = dropout2)
 		self.fc3 = nn.Linear(n_hidden_layers[1], n_labels)
-		self.device = device
 
 	def forward(self, x):
-
+		if self.batchnorm1=='On':
+			x = self.fc0_bn(x)
 		x = self.fc1(x)
-		x = F.prelu(x, torch.tensor(0.1, device = self.device))
+		x = F.prelu(x, torch.tensor(0.1))
+		if self.batchnorm1=='On':
+			x = self.fc1_bn(x)
+		x = self.fc1_do(x)
 		x = self.fc2(x)
-		x = F.prelu(x, torch.tensor(0.1, device = self.device))
+		x = F.prelu(x, torch.tensor(0.1))
+		if self.batchnorm2=='On':
+			x = self.fc2_bn(x)
+		x = self.fc2_do(x)
 		x = self.fc3(x)
 
 		return x
@@ -41,10 +54,9 @@ class MLP(nn.Module):
 		return x
 		# Add dropout layers and batch nomarlization layers
 
-
 class MLP_model(ClassifierMixin):
 	# MLP model compatible with sklearn etimator API
-	def __init__(self, n_hidden_layers, target_labels, epoches = 20, learning_rate = 0.00001, batch_size = 300, device = 'cpu'):
+	def __init__(self, n_hidden_layers, target_labels, epoches = 20, learning_rate = 0.00001, batch_size = 300, dropout1 =0.5, dropout2 = 0.5, batchnorm1= 'On', batchnorm2 ='On', alpha = 0.0001):
 		'''
 		Initialze define the parameters here. 
 		Keyword Arguments:
@@ -59,9 +71,13 @@ class MLP_model(ClassifierMixin):
 		self.n_hidden_layers = n_hidden_layers
 		self.epoches = epoches
 		self.learning_rate = learning_rate 
-		# self.score = score 
+		#self.score = score 
 		self.batch_size = batch_size
-		self.device = device
+		self.dropout1 = dropout1
+		self.dropout2 = dropout2
+		self.batchnorm1 = batchnorm1
+		self.batchnorm2 = batchnorm2
+		self.alpha = alpha
 
 	def predict(self, X):
 		# Predict labels for given instances 
@@ -78,7 +94,9 @@ class MLP_model(ClassifierMixin):
 		W = abs(1-M)
 		accuracy, sensitivity, specificity, BA = evaluate_model(self, X, y, W)
 
+		
 		return BA
+		
 
 	def fit(self, X_train, y_train, X_test = None, y_test = None, M_train = None, M_test = None, report = False):
 		'''
@@ -92,36 +110,30 @@ class MLP_model(ClassifierMixin):
 			M_train: default None means that the weighting matrix will not count the effect of missing labels
 		'''
 		# Initialize the model by parameters 
-		try:
-			mlp = self.MLP
-		except:
-			mlp = MLP(self.n_hidden_layers, X_train.shape[1], y_train.shape[1], device = self.device)
-			
-		mlp = mlp.to(self.device)
-		best_score = 0
+		self.MLP = MLP(self.n_hidden_layers, X_train.shape[1], y_train.shape[1], dropout1 = self.dropout1,dropout2 = self.dropout2, batchnorm1 = self.batchnorm1, batchnorm2 = self.batchnorm2, alpha = self.alpha)#[1] number of feature, number of label
 
 		# build the instance weighting matrix
 		if M_train is not None:
 			# Count both the effect of imbalanced classes and missing labels
-			W_train = (y_train/np.sum(y_train, axis = 0)/2 + abs(y_train -1)/(np.sum(abs(y_train -1)*abs(M_train-1), axis = 0))/2)*y_train.shape[0]*abs(M_train-1)
+			W_train = (y_train/np.sum(y_train, axis = 0)/2 + abs(y_train -1)/(np.sum(abs(y_train -1), axis = 0))/2)*y_train.shape[0]*abs(M_train-1)
 		else:
 			W_train = (y_train/np.sum(y_train, axis = 0)/2 + abs(y_train -1)/(np.sum(abs(y_train -1), axis = 0))/2)*y_train.shape[0]
 
 		# In order to train using pytorch, convert the data to torch tensor
-		X_train = torch.tensor(X_train, device=self.device).float()
-		y_train = torch.tensor(y_train, device=self.device).float()
-		W_train = torch.tensor(W_train, device=self.device).float()
+		X_train = torch.tensor(X_train).float()
+		y_train = torch.tensor(y_train).float()
+		W_train = torch.tensor(W_train).float()
 
 		if M_test is not None:
-			W_test = torch.tensor(np.abs(M_test-1), device=self.device).float()
-			X_test = torch.tensor(X_test, device=self.device).float()
-			y_test = torch.tensor(y_test, device=self.device).float()
+			W_test = torch.tensor(np.abs(M_test-1)).float()
+			X_test = torch.tensor(X_test).float()
+			y_test = torch.tensor(y_test).float()
 
 
 		batch_size = self.batch_size
 
 		# define the optimizer and loss function 
-		optimizer = Adam(mlp.parameters(), lr=self.learning_rate)
+		optimizer = Adam(self.MLP.parameters(), lr=self.learning_rate)
 		BCE = F.binary_cross_entropy
 
 		# train the model for epoches times
@@ -138,9 +150,9 @@ class MLP_model(ClassifierMixin):
 				y_batch = y_train[batch_idx*batch_size:(batch_idx+1)*batch_size, :]
 				W_batch = W_train[batch_idx*batch_size:(batch_idx+1)*batch_size, :]
 
-				y_out = mlp(X_batch)
-				y_out = mlp.logist(y_out)
-				loss = BCE(y_out, y_batch, weight = W_batch)
+				y_out = self.MLP(X_batch)
+				y_out = self.MLP.logist(y_out)
+				loss = BCE(y_out, y_batch, weight = W_batch)+alpha*np.linalg.norm(W_batch, 'fro')
 
 				loss.backward()
 				optimizer.step()
@@ -151,11 +163,8 @@ class MLP_model(ClassifierMixin):
 					print('Train Epoch: %d [%d/%d (%d%%)]\tLoss: %.6f' %(i, batch_idx * batch_size, X_train.shape[0], 100. * batch_idx * batch_size/ X_train.shape[0], loss.item()))
 			# report the test score when an epoch is finished
 			if X_test is not None and report:
-				self.MLP = mlp.to('cpu')
 				print('Test epoch %d:' %(i))
 				evaluate_model(self, X_test, y_test, W_test)
-
-		self.MLP = mlp.to('cpu')
 
 	# Following are API to meet the sklearn custom estimator, don't have to understand 
 	def setattr(self, parameter, value): 
@@ -182,7 +191,7 @@ class MLP_model(ClassifierMixin):
 
 		return self 
 
-if __name__ == '__main__': 
+if __name__ == 'main': 
 
 	# Didn't include the code for loading the data
 	# Just for your reference about how to use the model
